@@ -1,91 +1,91 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 
-# Processo Clean-Room e Firewall de Informação
+# Clean-Room Process and Information Firewall
 
-Este documento define o protocolo de isolamento (*clean-room*) sob o qual esta especificação foi redigida e sob o qual o time limpo deve produzir a reimplementação do firmware da VPU **Arm China Linlon V5** (`HARDWARE_ID = 0x56635002`) para os SoCs **SpacemiT K1** e **SpacemiT K3**.
-
----
-
-## 1. Separação de Papéis
-
-O desenvolvimento segue o modelo clássico de duas equipes isoladas por um firewall documental:
-
-1. **Equipe de Especificação (lado sujo → produção desta pasta)**
-   - Inspeciona fontes públicas (driver Linux GPL-2.0 `mvx`, toolchain público `ARM-software/rasc-devkit`, datasheets e Device Trees), capturas empíricas em placas SpacemiT K1 e K3 e o comportamento observável do hardware.
-   - Destila exclusivamente **fatos de hardware**, **contratos ABI públicos**, **máquinas de estados**, **especificações de ISA** e **sequências funcionais de registradores** para dentro de `VPU/docsClean/`.
-2. **Equipe de Implementação (lado limpo → consumo desta pasta)**
-   - Nunca teve acesso a blobs `.fwb` proprietários, desmontagens, código decompilado/levantado ou código-fonte proprietário do firmware da Arm China.
-   - Lê exclusivamente esta especificação, headers públicos open-source do driver Linux (`GPL-2.0-only`), o toolchain público `ARM-software/rasc-devkit` (`GPLv2`), padrões públicos de vídeo (ITU-T H.264, H.265/HEVC, JPEG, VP8, VP9, MPEG-2/4, etc.) e os Device Trees/datasheets da SpacemiT.
-   - Escreve toda a implementação do firmware (runtime RASC, `crt0`, linker script, tratador MVE 3.5, escalonador interno e controladores de blocos de vídeo) do zero, com arquitetura interna, estruturas privadas, nomes de símbolos e algoritmos próprios.
+This document defines the isolation protocol (*clean-room*) under which this specification was written and under which the clean team must produce the reimplementation of the **Arm China Linlon V5** (`HARDWARE_ID = 0x56635002`) VPU firmware for the **SpacemiT K1** and **SpacemiT K3** SoCs.
 
 ---
 
-## 2. O Que Pode e O Que Não Pode Entrar Nesta Especificação
+## 1. Separation of Roles
 
-### Permitido
+Development follows the classic two-team model isolated by a documentary firewall:
 
-- **Contratos públicos do driver Linux GPL-2.0 (`mvx` / `vpu_k1x` / `vpu_k3`):**
-  - Header de protocolo `mve_protocol_def.h`: regiões virtuais `MVE_MEM_REGION_*`, endereços de filas `MVE_COMM_*`, estruturas `mve_comm_area_*`, `mve_rpc_communication_area`, `mve_msg_header`, códigos `MVE_REQUEST_CODE_*`, `MVE_RESPONSE_CODE_*`, `MVE_BUFFER_CODE_*`, opções `MVE_SET_OPT_INDEX_*`, formatos `MVE_FORMAT_*`, descritores de buffer e eventos.
-  - Registradores APB do lado host (`mvx_hwreg.h`/`mvx_hwreg.c`), campos de `JOBQUEUE`, `CORELSID`, `CTRL`, `FUSE` e sequência de LSID (`mvx_lsid.c`).
-  - Formato da MMU de 2 níveis (`mvx_mmu.h`/`mvx_mmu.c`), layout do PTE de 32 bits e tradução física DMA do K1 (`phys_cpu2vpu`/`phys_vpu2cpu`).
-  - Cabeçalho do contêiner `.fwb` (`struct mvx_fw_header`, 180 bytes) e regras de carga/mapeamento pelo driver (`mvx_firmware.c`, `mvx_firmware_cache.c`).
-- **Especificação pública da ISA e ABI RASC (`ARM-software/rasc-devkit`):**
-  - Tabela de codificação de instruções, máscaras de bits, sufixos de imediato e branch, semântica BCC3, conjunto de registradores (`r0`–`r15`, `v0`–`v15`) e convenção de chamada do `rasc-elf-gcc`.
-- **Fatos empíricos de hardware medidos em silício (K1 e K3):**
-  - Valores lidos dos registradores globais/LSID, frequências de clock, traces de protocolo MVE 3.5 e resultados de sondas (*probes*) próprias executadas nas CPUs RASC do K1.
-- **Registradores internos de hardware sem documentação pública:**
-  - Quando um registrador MMIO interno (`0xFF00_0000`–`0xFF2F_8FFF`) ou registrador de controle (`CR0`–`CR255`) é necessário para operar o silício (ex.: `0xFF02B028` para sinalizar IRQ ao host, `CR14` para sincronização, `CR15` para manutenção de cache), ele é especificado exclusivamente por seu **endereço/número**, **largura de acesso**, **direção (R/W)**, **valor/máscara exigida** e **efeito observável no hardware**, marcado explicitamente como sem documentação pública.
-- **Requisitos comportamentais e máquinas de estados:**
-  - Pré-condições, pós-condições, invariantes, validações de buffer/opção, transições de estado MVE e fluxos de dados entre os blocos de hardware (`BITSTREAM`, `REF`, `ME`, `MC`, `TRF`, `DBL`, `SDMA`, `VDMA`).
-
-### Estritamente Proibido
-
-- Trechos de código C, Assembly RASC ou pseudocódigo copiados dos blobs `.fwb` proprietários ou de qualquer ferramenta de desmontagem/decompilação/lifting.
-- Endereços internos de código, tabelas, dados, BSS ou pilhas dos blobs proprietários (por exemplo, offsets internos de funções, ponteiros de tabelas internas ou layouts privados de `master_rw` do firmware original).
-- Nomes de funções internas, variáveis privadas, strings de diagnóstico internas copiadas literalmente como requisito ou layouts privados de estruturas internas não expostas no contrato público `mve_protocol_def.h`.
-- Estatísticas, hashes, revisões SVN, tabelas de bitmap de BSS ou artefatos de compilação extraídos dos binários proprietários da Arm China.
+1. **Specification Team (dirty side → produces this folder)**
+   - Inspects public sources (GPL-2.0 Linux `mvx` driver, public `ARM-software/rasc-devkit` toolchain, datasheets, and Device Trees), empirical captures on SpacemiT K1 and K3 boards, and observable hardware behavior.
+   - Distills exclusively **hardware facts**, **public ABI contracts**, **state machines**, **ISA specifications**, and **functional register sequences** into `VPU/docsClean/`.
+2. **Implementation Team (clean side → consumes this folder)**
+   - Has never had access to proprietary `.fwb` blobs, disassemblies, decompiled/lifted code, or proprietary Arm China firmware source code.
+   - Reads exclusively this specification, public open-source Linux driver headers (`GPL-2.0-only`), the public `ARM-software/rasc-devkit` toolchain (`GPLv2`), public video standards (ITU-T H.264, H.265/HEVC, JPEG, VP8, VP9, MPEG-2/4, etc.), and SpacemiT Device Trees/datasheets.
+   - Writes the entire firmware implementation (RASC runtime, `crt0`, linker script, MVE 3.5 handler, internal scheduler, and video block controllers) from scratch, with its own internal architecture, private structures, symbol names, and algorithms.
 
 ---
 
-## 3. Hierarquia de Fontes e Proveniência
+## 2. What May and May Not Enter This Specification
 
-Em caso de dúvida ou aparente divergência entre fontes, aplique a seguinte precedência:
+### Allowed
 
-1. **`[P]` Fontes públicas normativas**
-   - Driver Linux GPL-2.0 (`mve_protocol_def.h`, `mvx_hwreg.*`, `mvx_lsid.*`, `mvx_mmu.*`, `mvx_firmware*.*`), Device Trees (`k1-x.dtsi`, DT do K3) e `ARM-software/rasc-devkit` (`rasc-opc.c`, `rasc-dis.c`, backend `gcc/config/rasc/`).
-2. **`[O]` Evidências medidas em hardware real (SpacemiT K1 BPI-F3 e K3 Pico ITX)**
-   - Comportamento real do silício `0x56635002`: prevalece sobre inferências de documentação (por exemplo, as semânticas medidas no silício de `movh = <<1`, `movw = <<2`, `movn = ~imm` e CRs de 8 bits, bem como `HARDWARE_ID = 0x56635002` idêntico entre K1 e K3).
-3. **`[D]` Especificação derivada de interação com o silício**
-   - Sequências de inicialização, endereços MMIO internos e semântica operacional de `CR`s necessárias para que o hardware satisfaça `[P]` e `[O]`.
+- **Public contracts of the GPL-2.0 Linux driver (`mvx` / `vpu_k1x` / `vpu_k3`):**
+  - Protocol header `mve_protocol_def.h`: virtual regions `MVE_MEM_REGION_*`, queue addresses `MVE_COMM_*`, structures `mve_comm_area_*`, `mve_rpc_communication_area`, `mve_msg_header`, codes `MVE_REQUEST_CODE_*`, `MVE_RESPONSE_CODE_*`, `MVE_BUFFER_CODE_*`, options `MVE_SET_OPT_INDEX_*`, formats `MVE_FORMAT_*`, buffer descriptors, and events.
+  - Host-side APB registers (`mvx_hwreg.h`/`mvx_hwreg.c`), fields of `JOBQUEUE`, `CORELSID`, `CTRL`, `FUSE`, and LSID sequence (`mvx_lsid.c`).
+  - 2-level MMU format (`mvx_mmu.h`/`mvx_mmu.c`), 32-bit PTE layout, and K1 physical DMA translation (`phys_cpu2vpu`/`phys_vpu2cpu`).
+  - `.fwb` container header (`struct mvx_fw_header`, 180 bytes) and driver loading/mapping rules (`mvx_firmware.c`, `mvx_firmware_cache.c`).
+- **Public RASC ISA and ABI specification (`ARM-software/rasc-devkit`):**
+  - Instruction encoding table, bitmasks, immediate and branch suffixes, BCC3 semantics, register set (`r0`–`r15`, `v0`–`v15`), and `rasc-elf-gcc` calling convention.
+- **Empirical hardware facts measured on silicon (K1 and K3):**
+  - Values read from global/LSID registers, clock frequencies, MVE 3.5 protocol traces, and results from custom probes executed on the K1's RASC CPUs.
+- **Internal hardware registers without public documentation:**
+  - When an internal MMIO register (`0xFF00_0000`–`0xFF2F_8FFF`) or control register (`CR0`–`CR255`) is required to operate the silicon (e.g., `0xFF02B028` to signal an IRQ to the host, `CR14` for synchronization, `CR15` for cache maintenance), it is specified exclusively by its **address/number**, **access width**, **direction (R/W)**, **required value/mask**, and **observable hardware effect**, explicitly marked as having no public documentation.
+- **Behavioral requirements and state machines:**
+  - Preconditions, postconditions, invariants, buffer/option validations, MVE state transitions, and data flows between hardware blocks (`BITSTREAM`, `REF`, `ME`, `MC`, `TRF`, `DBL`, `SDMA`, `VDMA`).
+
+### Strictly Forbidden
+
+- Snippets of C code, RASC assembly, or pseudocode copied from proprietary `.fwb` blobs or from any disassembly/decompilation/lifting tool.
+- Internal code, table, data, BSS, or stack addresses from proprietary blobs (for example, internal function offsets, internal table pointers, or private `master_rw` layouts from the original firmware).
+- Internal function names, private variables, internal diagnostic strings copied literally as a requirement, or private layouts of internal structures not exposed in the public `mve_protocol_def.h` contract.
+- Statistics, hashes, SVN revisions, BSS bitmap tables, or build artifacts extracted from proprietary Arm China binaries.
 
 ---
 
-## 4. Protocolo de Clarificação (Loop de Perguntas)
+## 3. Source Hierarchy and Provenance
 
-Se durante a reimplementação o time limpo encontrar uma lacuna ou ambiguidade de hardware:
+In case of doubt or apparent divergence between sources, apply the following precedence:
 
-1. **Registre uma pergunta objetiva focada em contrato ou registrador de hardware**, por exemplo:
-   - *"Quais bits do registrador interno em `0xFF0230xx` controlam o release de reset de cada CPU RASC worker (RASC1..4)?"*
-   - *"Qual a sequência de programação de registradores do bloco `VDMA` para transferir um frame NV12 do buffer virtual `FRAMEBUF` para a SRAM interna?"*
-   - *"Qual bit do Status Register (`SR`) habilita interrupções externas ao executar `seti`/`clri`?"*
-2. **A equipe de especificação investiga o hardware/experimento e atualiza o documento correspondente em `docsClean/`** com tabelas de registradores, sequências ou regras comportamentais — nunca enviando código ou detalhes internos de implementação do firmware proprietário.
-3. **Nunca presuma detalhes não verificados de outros IPs Mali-V / Linlon** (como Mali-V500/V550/V61 ou outras gerações): offsets MMIO internos, fusíveis, recursos de downscaling flexível e formatos suportados variam por família de silício.
+1. **`[P]` Normative public sources**
+   - GPL-2.0 Linux driver (`mve_protocol_def.h`, `mvx_hwreg.*`, `mvx_lsid.*`, `mvx_mmu.*`, `mvx_firmware*.*`), Device Trees (`k1-x.dtsi`, K3 DT), and `ARM-software/rasc-devkit` (`rasc-opc.c`, `rasc-dis.c`, `gcc/config/rasc/` backend).
+2. **`[O]` Evidence measured on real hardware (SpacemiT K1 BPI-F3 and K3 Pico ITX)**
+   - Actual behavior of `0x56635002` silicon: takes precedence over documentation inferences (for example, silicon-measured semantics of `movh = <<1`, `movw = <<2`, `movn = ~imm`, and 8-bit CRs, as well as identical `HARDWARE_ID = 0x56635002` between K1 and K3).
+3. **`[D]` Specification derived from silicon interaction**
+   - Initialization sequences, internal MMIO addresses, and operational semantics of `CR`s required for the hardware to satisfy `[P]` and `[O]`.
 
 ---
 
-## 5. Critérios de Aceitação do Firmware Clean-Room
+## 4. Clarification Protocol (Question Loop)
 
-Uma reimplementação em sala limpa é considerada funcionalmente progressiva contra o driver `mvx` (K1 e K3) conforme os marcos verificáveis abaixo:
+If during reimplementation the clean team encounters a hardware gap or ambiguity:
 
-| Marco | Requisito Verificável |
+1. **Log an objective question focused on a contract or hardware register**, for example:
+   - *"Which bits of the internal register at `0xFF0230xx` control the reset release of each worker RASC CPU (RASC1..4)?"*
+   - *"What is the register programming sequence for the `VDMA` block to transfer an NV12 frame from the `FRAMEBUF` virtual buffer to internal SRAM?"*
+   - *"Which bit of the Status Register (`SR`) enables external interrupts when executing `seti`/`clri`?"*
+2. **The specification team investigates the hardware/experiment and updates the corresponding document in `docsClean/`** with register tables, sequences, or behavioral rules — never sending code or internal implementation details of the proprietary firmware.
+3. **Never assume unverified details from other Mali-V / Linlon IPs** (such as Mali-V500/V550/V61 or other generations): internal MMIO offsets, fuses, flexible downscaling features, and supported formats vary by silicon family.
+
+---
+
+## 5. Clean-Room Firmware Acceptance Criteria
+
+A clean-room reimplementation is considered functionally progressive against the `mvx` driver (K1 and K3) according to the verifiable milestones below:
+
+| Milestone | Verifiable Requirement |
 |---|---|
-| **M1 — Contêiner `.fwb`, Boot RASC e Canal MVE** | Gera `.fwb` válido (header 180 B + trampolim de reset + `text_length` incluindo header + pilha PC-relativa), boota na RASC0 do K1/K3, escreve uma resposta na fila `MSG_OUTQ` (`0x1007_A000`), executa `CR14 = 0` + `0xFF02B028 = 1` e o driver Linux recebe a IRQ e decodifica a mensagem sem erro de protocolo. |
-| **M2 — Handshake MVE 3.5 Completo (Plano de Controle)** | Responde `SWITCHED_IN`, processa `PING`→`PONG`, `SET_OPTION`→`SET_OPTION_CONFIRM`/`FAIL`, `JOB`→`JOB_DEQUEUED`, `GO`→`STATE_CHANGE(RUNNING)`, `STOP`→`STATE_CHANGE(STOPPED)`, `INPUT_FLUSH`/`OUTPUT_FLUSH`, `IDLE`/`IDLE_ACK`, `SWITCH`→`SWITCHED_OUT` e solicita memória via RPC (`MEM_ALLOC`/`MEM_RESIZE`/`MEM_FREE`) sem violação de máquina de estados. |
-| **M3 — Multi-RASC e Multi-Core (K1 2 cores / K3 4 cores)** | Inicializa corretamente as 5 CPUs RASC por core (vetores de worker, cache via `CR15`, exceções via `FAR`/`PC`/`SR`) e coordena múltiplas instâncias de core via `master_rw` quando escalonado com `cores = 2` (K1) ou `cores = 4` (K3). |
-| **M4 — Primeiro Codec Funcional (JPEG / MJPEG)** | Decodifica (e/ou codifica) frames JPEG Baseline via blocos `BITSTREAM`/`TRF`/`VDMA`, entregando saída planar (NV12/I420) bit-exata ou conforme padrão ITU-T T.81 no driver V4L2 M2M. |
-| **M5 — Decode H.264 / HEVC Completo** | Executa parsing completo de bitstream (`BITSTREAM`), buffers intermediários (`IntBuf` via RPC), DPB com reordenação e referências (`REF`/AFBC), `MC` + `TRF` + `DBL` + `VDMA`, emitindo `FRAME_ALLOC_PARAM` e `SEQUENCE_PARAMETERS`, suportando troca dinâmica de resolução e saída NV12/I420/AFBC até 4K. |
-| **M6 — Suite de Codecs, Encode e Robustez** | Suporte progressivo a encode (H.264/HEVC/VP8/VP9/JPEG com ME e rate control), demais codecs de decode (VP8/VP9/MPEG-2/MPEG-4/H.263/VC-1/RV/AVS/AVS2), multi-sessão concorrente em 4 LSIDs, watchdog e recuperação limpa em streams corrompidos. |
+| **M1 — `.fwb` Container, RASC Boot, and MVE Channel** | Generates a valid `.fwb` (180 B header + reset trampoline + `text_length` including header + PC-relative stack), boots on RASC0 of K1/K3, writes a response to the `MSG_OUTQ` queue (`0x1007_A000`), executes `CR14 = 0` + `0xFF02B028 = 1`, and the Linux driver receives the IRQ and decodes the message without protocol errors. |
+| **M2 — Complete MVE 3.5 Handshake (Control Plane)** | Responds with `SWITCHED_IN`, processes `PING`→`PONG`, `SET_OPTION`→`SET_OPTION_CONFIRM`/`FAIL`, `JOB`→`JOB_DEQUEUED`, `GO`→`STATE_CHANGE(RUNNING)`, `STOP`→`STATE_CHANGE(STOPPED)`, `INPUT_FLUSH`/`OUTPUT_FLUSH`, `IDLE`/`IDLE_ACK`, `SWITCH`→`SWITCHED_OUT`, and requests memory via RPC (`MEM_ALLOC`/`MEM_RESIZE`/`MEM_FREE`) without state-machine violations. |
+| **M3 — Multi-RASC and Multi-Core (K1 2 cores / K3 4 cores)** | Properly initializes the 5 RASC CPUs per core (worker vectors, cache via `CR15`, exceptions via `FAR`/`PC`/`SR`) and coordinates multiple core instances via `master_rw` when scheduled with `cores = 2` (K1) or `cores = 4` (K3). |
+| **M4 — First Functional Codec (JPEG / MJPEG)** | Decodes (and/or encodes) JPEG Baseline frames via the `BITSTREAM`/`TRF`/`VDMA` blocks, delivering bit-exact or ITU-T T.81-compliant planar output (NV12/I420) in the V4L2 M2M driver. |
+| **M5 — Complete H.264 / HEVC Decode** | Executes full bitstream parsing (`BITSTREAM`), intermediate buffers (`IntBuf` via RPC), DPB with reordering and references (`REF`/AFBC), `MC` + `TRF` + `DBL` + `VDMA`, emitting `FRAME_ALLOC_PARAM` and `SEQUENCE_PARAMETERS`, supporting dynamic resolution switching and NV12/I420/AFBC output up to 4K. |
+| **M6 — Codec Suite, Encode, and Robustness** | Progressive support for encode (H.264/HEVC/VP8/VP9/JPEG with ME and rate control), remaining decode codecs (VP8/VP9/MPEG-2/MPEG-4/H.263/VC-1/RV/AVS/AVS2), concurrent multi-session across 4 LSIDs, watchdog, and clean recovery on corrupted streams. |
 
 ---
 
-*Licença: [CC-BY-SA-4.0](LICENSE) — Creative Commons Attribution-ShareAlike 4.0 International.*
+*License: [CC-BY-SA-4.0](LICENSE) — Creative Commons Attribution-ShareAlike 4.0 International.*

@@ -1,20 +1,20 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 
-# Contextos LSID, Escalonador de Hardware e Multi-Core
+# LSID Contexts, Hardware Scheduler, and Multi-Core
 
-Este documento especifica o modelo de contextos de sessão (**LSID — Local Session ID**), o ciclo de vida de mapeamento/desmapeamento no hardware, a fila de jobs (`JOBQUEUE`), o fluxo de interrupções entre host e VPU e como a topologia multi-core (2 cores no K1, 4 cores no K3) é conduzida pelo escalonador de hardware.
+This document specifies the session context model (**LSID — Local Session ID**), the hardware mapping/unmapping lifecycle, the job queue (`JOBQUEUE`), the interrupt flow between host and VPU, and how multi-core topology (2 cores on K1, 4 cores on K3) is driven by the hardware scheduler.
 
 ---
 
-## 1. Modelo de LSID e Multiplexação de Sessões (`[P]`)
+## 1. LSID Model and Session Multiplexing (`[P]`)
 
-A VPU Linlon V5 possui **`NLSID = 4`** bancos de registradores de sessão independentes (`LSID 0..3`). Cada LSID encapsula:
-- Sua própria raiz de MMU (`MMU_CTRL`), isolando completamente o espaço virtual de 32 bits da sessão;
-- Suas restrições de cores (`CTRL`: `DISALLOW` + `MAXCORES`);
-- Seus canais independentes de interrupção (`LIRQVE` e `IRQHOST`);
-- Seus atributos de barramento AXI (`BUSATTR_0..3`) e estado de proteção (`ALLOC`/`NPROT`).
+The Linlon V5 VPU has **`NLSID = 4`** independent session register banks (`LSID 0..3`). Each LSID encapsulates:
+- Its own MMU root (`MMU_CTRL`), completely isolating the session's 32-bit virtual address space;
+- Its core constraints (`CTRL`: `DISALLOW` + `MAXCORES`);
+- Its independent interrupt channels (`LIRQVE` and `IRQHOST`);
+- Its AXI bus attributes (`BUSATTR_0..3`) and protection state (`ALLOC`/`NPROT`).
 
-Quando existem mais de 4 sessões V4L2 abertas simultaneamente, o escalonador do driver multiplexa sessões sobre os 4 LSIDs de hardware salvando e restaurando o **PCB (*Process Control Block*)** de cada sessão:
+When more than 4 V4L2 sessions are open simultaneously, the driver scheduler multiplexes sessions across the 4 hardware LSIDs by saving and restoring each session's **PCB (*Process Control Block*)**:
 
 ```c
 struct mvx_lsid_pcb {
@@ -27,138 +27,138 @@ struct mvx_lsid_pcb {
 
 ---
 
-## 2. Sequências de Hardware do Ciclo de Vida de um LSID (`[P]`)
+## 2. LSID Lifecycle Hardware Sequences (`[P]`)
 
-### 2.1 Mapeamento de uma Sessão em um LSID (`mvx_lsid_map`)
+### 2.1 Mapping a Session to an LSID (`mvx_lsid_map`)
 
-Pré-condição: o LSID escolhido deve estar livre (`ALLOC == 0`).
+Precondition: the chosen LSID must be free (`ALLOC == 0`).
 
-1. Ler `ALLOC` (`+0x0C`) e confirmar que vale `MVE_ALLOC_FREE` (`0`).
-2. Escrever `ALLOC`:
-   - `MVE_ALLOC_PROTECTED` (`2`) se `pcb->nprot == 0` (sessão protegida), ou
-   - `MVE_ALLOC_NON_PROTECTED` (`1`) caso contrário.
-3. Garantir estado limpo executando `TERMINATE`:
-   - Escrever `1` em `TERMINATE` (`+0x18`).
-   - Fazer poll em `TERMINATE` até ler `0`.
-4. Configurar topologia de cores em `CTRL` (`+0x00`) = `pcb->ctrl` (`(maxcores << 8) | disallow`).
-5. Configurar a tabela de páginas L1 em `MMU_CTRL` (`+0x04`) = `pcb->mmu_ctrl`.
-6. Invalidar a TLB escrevendo `0` em `FLUSH_ALL` (`+0x10`).
-7. Configurar `BUSATTR_0..3` (`+0x30..+0x3C`): valores do Device Tree (se presentes) ou default do driver (`0x00, 0x00, 0x33, 0x33`).
-8. Restaurar estado de interrupções:
+1. Read `ALLOC` (`+0x0C`) and confirm it equals `MVE_ALLOC_FREE` (`0`).
+2. Write `ALLOC`:
+   - `MVE_ALLOC_PROTECTED` (`2`) if `pcb->nprot == 0` (protected session), or
+   - `MVE_ALLOC_NON_PROTECTED` (`1`) otherwise.
+3. Ensure a clean state by executing `TERMINATE`:
+   - Write `1` to `TERMINATE` (`+0x18`).
+   - Poll `TERMINATE` until it reads `0`.
+4. Configure core topology in `CTRL` (`+0x00`) = `pcb->ctrl` (`(maxcores << 8) | disallow`).
+5. Configure the L1 page table in `MMU_CTRL` (`+0x04`) = `pcb->mmu_ctrl`.
+6. Invalidate the TLB by writing `0` to `FLUSH_ALL` (`+0x10`).
+7. Configure `BUSATTR_0..3` (`+0x30..+0x3C`): values from Device Tree (if present) or driver defaults (`0x00, 0x00, 0x33, 0x33`).
+8. Restore interrupt state:
    - `LIRQVE` (`+0x1C`) = `0`.
    - `IRQHOST` (`+0x20`) = `pcb->irqhost`.
-9. Executar barreira de escrita (`wmb()`) para garantir visibilidade de todos os registradores antes de ativar o escalonador.
-10. Habilitar o escalonamento escrevendo `1` em `SCHED` (`+0x14`).
+9. Execute a write memory barrier (`wmb()`) to guarantee visibility of all registers before enabling the scheduler.
+10. Enable scheduling by writing `1` to `SCHED` (`+0x14`).
 
-### 2.2 Verificação de Ociosidade de um LSID (`mvx_lsid_idle`)
+### 2.2 Checking LSID Idle State (`mvx_lsid_idle`)
 
-Um LSID só é considerado **ocioso** (e portanto seguro para desmapeamento) quando **ambas** as condições são verdadeiras:
-1. O número do LSID **não** aparece em nenhum dos 4 slots de `JOBQUEUE` (`0x14`).
-2. O número do LSID **não** aparece em nenhum dos `NCORES` nibbles de `CORELSID` (`0x10`).
+An LSID is considered **idle** (and therefore safe to unmap) only when **both** conditions hold:
+1. The LSID number does **not** appear in any of the 4 slots of `JOBQUEUE` (`0x14`).
+2. The LSID number does **not** appear in any of the `NCORES` nibbles of `CORELSID` (`0x10`).
 
-### 2.3 Desmapeamento de um LSID (`mvx_lsid_unmap`)
+### 2.3 Unmapping an LSID (`mvx_lsid_unmap`)
 
-Pré-condição obrigatória: o LSID deve estar ocioso (`mvx_lsid_idle == true`).
+Mandatory precondition: the LSID must be idle (`mvx_lsid_idle == true`).
 
-1. Desabilitar o escalonamento escrevendo `0` em `SCHED` (`+0x14`).
-2. Salvar no PCB da sessão: `ctrl`, `mmu_ctrl`, `irqhost` e `nprot`.
-3. Liberar o LSID escrevendo `MVE_ALLOC_FREE` (`0`) em `ALLOC` (`+0x0C`).
+1. Disable scheduling by writing `0` to `SCHED` (`+0x14`).
+2. Save into the session's PCB: `ctrl`, `mmu_ctrl`, `irqhost`, and `nprot`.
+3. Release the LSID by writing `MVE_ALLOC_FREE` (`0`) to `ALLOC` (`+0x0C`).
 
-### 2.4 Término Forçado (`mvx_lsid_terminate`)
+### 2.4 Forced Termination (`mvx_lsid_terminate`)
 
-Usado no fechamento de sessão ou recuperação de travamento/watchdog:
-1. Remover o LSID da `JOBQUEUE` (se presente).
-2. Escrever `1` em `TERMINATE` (`+0x18`).
-3. Fazer poll em `TERMINATE` até o hardware devolvê-lo como `0`.
-
----
-
-## 3. Operação da `JOBQUEUE` (`[P]`)
-
-### 3.1 Enfileiramento (`mvx_lsid_jobqueue_add`)
-
-1. Escrever `0` em `ENABLE` (`0x04`) para pausar o escalonador global.
-2. Ler `JOBQUEUE` (`0x14`).
-3. Verificar se o LSID já está em algum dos 4 slots (`0..3`); se já estiver, pular direto para o passo 5.
-4. Procurar o primeiro slot cujo campo `LSID` (`bits [3:0]`) seja `0xF` (`MVE_JOBQUEUE_JOB_INVALID`):
-   - Preencher o slot com `(lsid & 0xF) | (((ncores - 1) & 0xF) << 4)`.
-   - Escrever o valor atualizado em `JOBQUEUE`.
-5. Escrever `1` em `ENABLE` (`0x04`) para retomar o escalonador global.
-
-### 3.2 Remoção (`mvx_lsid_jobqueue_remove`)
-
-1. Escrever `0` em `ENABLE`.
-2. Ler `JOBQUEUE`, compactar os slots cujo LSID não corresponde ao removido mantendo a ordem FIFO, e preencher os slots restantes com `LSID = 0xF` e `NCORES-1 = ncores - 1`.
-3. Escrever `JOBQUEUE` e reabilitar `ENABLE = 1`.
+Used on session close or hang/watchdog recovery:
+1. Remove the LSID from `JOBQUEUE` (if present).
+2. Write `1` to `TERMINATE` (`+0x18`).
+3. Poll `TERMINATE` until hardware clears it back to `0`.
 
 ---
 
-## 4. Fluxo de Interrupções Host ↔ VPU (`[P][O]`)
+## 3. `JOBQUEUE` Operation (`[P]`)
+
+### 3.1 Enqueuing (`mvx_lsid_jobqueue_add`)
+
+1. Write `0` to `ENABLE` (`0x04`) to pause the global scheduler.
+2. Read `JOBQUEUE` (`0x14`).
+3. Check whether the LSID is already in any of the 4 slots (`0..3`); if so, skip directly to step 5.
+4. Find the first slot whose `LSID` field (`bits [3:0]`) is `0xF` (`MVE_JOBQUEUE_JOB_INVALID`):
+   - Fill the slot with `(lsid & 0xF) | (((ncores - 1) & 0xF) << 4)`.
+   - Write the updated value to `JOBQUEUE`.
+5. Write `1` to `ENABLE` (`0x04`) to resume the global scheduler.
+
+### 3.2 Removal (`mvx_lsid_jobqueue_remove`)
+
+1. Write `0` to `ENABLE`.
+2. Read `JOBQUEUE`, compact the slots whose LSID does not match the removed one while preserving FIFO order, and fill the remaining slots with `LSID = 0xF` and `NCORES-1 = ncores - 1`.
+3. Write `JOBQUEUE` and re-enable `ENABLE = 1`.
+
+---
+
+## 4. Host ↔ VPU Interrupt Flow (`[P][O]`)
 
 ### 4.1 Host → Firmware
 
-Quando o driver escreve novas mensagens/buffers nas filas `*_HOST` ou responde a um RPC:
-1. Executa barreira de escrita (`wmb()`) e sincronização de cache DMA (`dma_sync_single_for_device`).
-2. Atualiza `in_wpos` (ou `rpc_area->state = MVE_RPC_STATE_RETURN`) com nova barreira/sync.
-3. Escreve **`1` em `IRQHOST`** (`LSID_BASE + 0x20`), acordando os cores alocados ao LSID.
+When the driver writes new messages/buffers into the `*_HOST` queues or responds to an RPC:
+1. Executes a write barrier (`wmb()`) and DMA cache sync (`dma_sync_single_for_device`).
+2. Updates `in_wpos` (or `rpc_area->state = MVE_RPC_STATE_RETURN`) with another barrier/sync.
+3. Writes **`1` to `IRQHOST`** (`LSID_BASE + 0x20`), waking the cores assigned to the LSID.
 
 ### 4.2 Firmware → Host
 
-Quando o firmware escreve respostas em `MSG_OUTQ`, devolve buffers em `BUF_INRQ`/`BUF_OUTRQ` ou solicita um RPC (`state = MVE_RPC_STATE_PARAM`):
-1. O firmware garante a visibilidade da memória (escrevendo `0` em `CR14`, ver [internal-mmio-map.md](internal-mmio-map.md)).
-2. O firmware escreve **`1` em `0xFF02B028`** no barramento MMIO interno do core (`[O]`).
-3. O hardware seta o bit correspondente ao LSID em `IRQVE` (`0x18`) e dispara a IRQ `74` para a CPU RISC-V.
-4. No *top half* (`irq_top`):
-   - O host lê `NLSID` e `IRQVE`.
-   - Para cada LSID com bit ativo em `IRQVE`, escreve **`0` em `LIRQVE`** (`LSID_BASE + 0x1C`), executa `wmb()`, marca o LSID em um bitmap pendente e agenda a workqueue (`irq_bottom`).
-5. No *bottom half* (`irq_bottom`):
-   - Para cada LSID marcado, o host lê e processa todas as mensagens pendentes nas filas de saída, trata pedidos RPC e drena `ram_print`.
+When the firmware writes responses to `MSG_OUTQ`, returns buffers to `BUF_INRQ`/`BUF_OUTRQ`, or requests an RPC (`state = MVE_RPC_STATE_PARAM`):
+1. The firmware ensures memory visibility (by writing `0` to `CR14`, see [internal-mmio-map.md](internal-mmio-map.md)).
+2. The firmware writes **`1` to `0xFF02B028`** on the core's internal MMIO bus (`[O]`).
+3. Hardware sets the bit corresponding to the LSID in `IRQVE` (`0x18`) and asserts IRQ `74` to the RISC-V CPU.
+4. In the *top half* (`irq_top`):
+   - The host reads `NLSID` and `IRQVE`.
+   - For each LSID with an active bit in `IRQVE`, it writes **`0` to `LIRQVE`** (`LSID_BASE + 0x1C`), executes `wmb()`, marks the LSID in a pending bitmap, and schedules the workqueue (`irq_bottom`).
+5. In the *bottom half* (`irq_bottom`):
+   - For each marked LSID, the host reads and processes all pending messages in the output queues, handles RPC requests, and drains `ram_print`.
 
 ---
 
-## 5. Troca de Contexto (`SWITCH` / `SWITCHED_IN` / `SWITCHED_OUT`) (`[P][O]`)
+## 5. Context Switching (`SWITCH` / `SWITCHED_IN` / `SWITCHED_OUT`) (`[P][O]`)
 
-Como o hardware suporta múltiplos LSIDs disputando os mesmos cores físicos, o firmware deve colaborar com o escalonador do host:
+Because hardware supports multiple LSIDs competing for the same physical cores, the firmware must cooperate with the host scheduler:
 
 ```text
-  [Core Livre] ──(JOBQUEUE + SCHED=1)──► Firmware boota / retoma LSID
+  [Free Core] ──(JOBQUEUE + SCHED=1)──► Firmware boots / resumes LSID
                                               │
                                               ▼
-                                 Envia MVE_RESPONSE_CODE_SWITCHED_IN {core}
+                                 Sends MVE_RESPONSE_CODE_SWITCHED_IN {core}
                                               │
                                               ▼
-                                 Processa mensagens, buffers e frames
+                                 Processes messages, buffers, and frames
                                               │
                         ┌─────────────────────┴─────────────────────┐
-                        │ (Sem trabalho restante)                    │ (Host envia SWITCH)
+                        │ (No remaining work)                        │ (Host sends SWITCH)
                         ▼                                            ▼
-             Envia MVE_RESPONSE_CODE_IDLE                Drena/salva contexto do LSID
+             Sends MVE_RESPONSE_CODE_IDLE                 Drains/saves LSID context
                         │                                            │
                         ▼                                            │
-             Host responde MVE_REQUEST_CODE_IDLE_ACK                 │
-             e/ou MVE_REQUEST_CODE_SWITCH                            │
+             Host replies MVE_REQUEST_CODE_IDLE_ACK                  │
+             and/or MVE_REQUEST_CODE_SWITCH                          │
                         │                                            │
                         └─────────────────────┬─────────────────────┘
                                               ▼
-                       Envia MVE_RESPONSE_CODE_SWITCHED_OUT {core, reason, sub_reason}
+                       Sends MVE_RESPONSE_CODE_SWITCHED_OUT {core, reason, sub_reason}
                                               │
                                               ▼
-                       Core libera LSID (CORELSID volta a 0xF) e entra em wait
+                       Core releases LSID (CORELSID returns to 0xF) and enters wait
 ```
 
-- **Observado em hardware (`[O]`):** Ao encerrar o processamento dos buffers disponíveis de uma sessão H.264, o firmware envia `IDLE`, o host envia `SWITCH`, e o firmware responde `SWITCHED_OUT(core=0, reason=1, sub_reason=0)`, liberando o core (`CORELSID` retorna para `0x0000_00FF` no K1). Quando novo trabalho chega (ex.: `STOP`/`FLUSH` ou novos buffers), o host reinsere o LSID em `JOBQUEUE` e o firmware volta a emitir `SWITCHED_IN`.
+- **Observed on hardware (`[O]`):** Upon finishing processing of available buffers in an H.264 session, the firmware sends `IDLE`, the host sends `SWITCH`, and the firmware replies with `SWITCHED_OUT(core=0, reason=1, sub_reason=0)`, releasing the core (`CORELSID` returns to `0x0000_00FF` on K1). When new work arrives (e.g., `STOP`/`FLUSH` or new buffers), the host re-inserts the LSID into `JOBQUEUE` and the firmware emits `SWITCHED_IN` again.
 
 ---
 
-## 6. Transparência de Topologia Multi-Core (2 Cores K1 × 4 Cores K3) (`[P][O]`)
+## 6. Multi-Core Topology Transparency (K1 2 Cores vs. K3 4 Cores) (`[P][O]`)
 
-O firmware **não tem acesso** ao bloco de registradores globais (`0xC050_0000`) nem lê `NCORES`. Toda a adaptação entre K1 (2 cores) e K3 (4 cores) ocorre por quatro mecanismos dirigidos pelo host:
+The firmware **has no access** to the global register block (`0xC050_0000`) and does not read `NCORES`. All adaptation between K1 (2 cores) and K3 (4 cores) happens through four host-driven mechanisms:
 
-1. **Mapeamento MMU de instâncias:** O driver mapeia o mesmo código executável (`text`) e a mesma região compartilhada (`master_rw`) em cada instância de core `0 .. ncores-1` (`0x0000_0000`, `0x0100_0000`, `0x0200_0000`, `0x0300_0000`), alocando páginas de BSS **privadas** distintas para cada instância.
-2. **`CTRL` do LSID:** Define `MAXCORES` e `DISALLOW` conforme o `NCORES` do SoC.
-3. **`JOBQUEUE`:** Informa `(ncores - 1)` no slot de escalonamento de hardware.
-4. **Mensagem `MVE_REQUEST_CODE_JOB`:** Informa o campo `uint16_t cores` (entre `1` e `NCORES`) ao firmware. O firmware valida `cores >= 1` e coordena os cores participantes do job utilizando a região compartilhada `master_rw`. A alteração dinâmica do número de cores durante um job ativo não é suportada.
+1. **MMU instance mapping:** The driver maps the same executable code (`text`) and the same shared region (`master_rw`) into each core instance `0 .. ncores-1` (`0x0000_0000`, `0x0100_0000`, `0x0200_0000`, `0x0300_0000`), allocating distinct **private** BSS pages for each instance.
+2. **LSID `CTRL`:** Sets `MAXCORES` and `DISALLOW` according to the SoC's `NCORES`.
+3. **`JOBQUEUE`:** Passes `(ncores - 1)` in the hardware scheduling slot.
+4. **`MVE_REQUEST_CODE_JOB` message:** Passes the `uint16_t cores` field (between `1` and `NCORES`) to the firmware. The firmware validates `cores >= 1` and coordinates the participating cores of the job using the shared `master_rw` region. Dynamically changing the core count during an active job is not supported.
 
 ---
 
-*Licença: [CC-BY-SA-4.0](LICENSE) — Creative Commons Attribution-ShareAlike 4.0 International.*
+*License: [CC-BY-SA-4.0](LICENSE) — Creative Commons Attribution-ShareAlike 4.0 International.*

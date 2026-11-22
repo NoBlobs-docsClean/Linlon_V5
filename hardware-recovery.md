@@ -1,52 +1,52 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 
-# Watchdog, Detecção de Falhas e Recuperação de Hardware (`hardware-recovery`)
+# Watchdog, Fault Detection, and Hardware Recovery (`hardware-recovery`)
 
-Este documento especifica os mecanismos de detecção, diagnóstico e recuperação de falhas de hardware na VPU Linlon V5 (`0x56635002`): temporizador de watchdog interno (`0xFF02_5000`), falhas de MMU por bus master (`0xFF02_4000`), exceções de CPU RASC (`CR1`/`CR2`/`CR18`/`SR`), falhas de SDMA (`0xFF02_1F00`), comando `DUMP` e o protocolo de encerramento forçado pelo host (`TERMINATE`).
+This document specifies the hardware fault detection, diagnostic, and recovery mechanisms in the Linlon V5 VPU (`0x56635002`): internal watchdog timer (`0xFF02_5000`), per-bus-master MMU faults (`0xFF02_4000`), RASC CPU exceptions (`CR1`/`CR2`/`CR18`/`SR`), SDMA faults (`0xFF02_1F00`), the `DUMP` command, and the host-initiated forced termination protocol (`TERMINATE`).
 
 ---
 
-## 1. Watchdog de Hardware do Core (`0xFF02_5000`) (`[P][D]`)
+## 1. Core Hardware Watchdog (`0xFF02_5000`) (`[P][D]`)
 
-O core possui um bloco temporizador de watchdog dedicado em **`0xFF02_5000`**, configurado conforme a opção MVE `MVE_SET_OPT_INDEX_WATCHDOG_TIMEOUT` (`42`, onde `0` = desabilitado):
+The core has a dedicated watchdog timer block at **`0xFF02_5000`**, configured according to the MVE option `MVE_SET_OPT_INDEX_WATCHDOG_TIMEOUT` (`42`, where `0` = disabled):
 
-| Endereço | Offset | Largura | Acesso | Função |
+| Address | Offset | Width | Access | Function |
 |---|---:|---:|---|---|
-| **`0xFF02_5000`** | `+0x00` | 32b | W | **Comparador / Deadline de Watchdog:** dispara IRQ bit 4 (`0x10`) quando o contador `+0x10` atinge este valor |
-| **`0xFF02_5010`** | `+0x10` | 32b | R | **Contador livre (Free-Running Timer):** base de tempo monotônica do watchdog |
-| **`0xFF02_5014`** | `+0x14` | 32b | W | **Limpeza de IRQ do Watchdog:** escrever **`1`** limpa a interrupção pendente |
+| **`0xFF02_5000`** | `+0x00` | 32b | W | **Watchdog Comparator / Deadline:** fires IRQ bit 4 (`0x10`) when counter `+0x10` reaches this value |
+| **`0xFF02_5010`** | `+0x10` | 32b | R | **Free-Running Timer:** monotonic watchdog timebase |
+| **`0xFF02_5014`** | `+0x14` | 32b | W | **Watchdog IRQ Clear:** writing **`1`** clears the pending interrupt |
 
-### 1.1 Operação Normativa do Watchdog (`[D]`)
+### 1.1 Normative Watchdog Operation (`[D]`)
 
-- **Armar / Rearmar (Kick):**
+- **Arm / Rearm (Kick):**
   ```c
   uint32_t now = *(volatile uint32_t *)0xFF025010u;
   *(volatile uint32_t *)0xFF025000u = now + timeout_ticks;
   ```
-  - Habilitar bit 4 (`0x10`) no controlador de IRQ da RASC supervisora (`0xFF02_6000 + rasc_id * 0x1000`).
-  - Rearmar a cada progresso de frame/stripe ou no tratamento de eventos de trabalho.
-- **Ao disparar IRQ de Watchdog (bit 4 = `0x10` em `IRQ_STATUS`):**
-  1. Escrever **`1`** em `0xFF02_5014` para limpar a interrupção de hardware.
-  2. Opcionalmente registrar diagnóstico (estado dos blocos e contexto RASC) em `ram_print`.
-  3. Enviar **`MVE_RESPONSE_CODE_ERROR`** (`2010`) com **`error_code = MVE_ERROR_WATCHDOG` (`9`)** e mensagem descritiva em `MSG_OUTQ`, seguido de `CR14 = 0` e `0xFF02B028 = 1`.
-  4. Entrar em estado seguro/parado aguardando `TERMINATE` do host.
+  - Enable bit 4 (`0x10`) in the supervisor RASC's IRQ controller (`0xFF02_6000 + rasc_id * 0x1000`).
+  - Rearm on each frame/stripe progress or when handling work events.
+- **When the Watchdog IRQ fires (bit 4 = `0x10` in `IRQ_STATUS`):**
+  1. Write **`1`** to `0xFF02_5014` to clear the hardware interrupt.
+  2. Optionally record diagnostics (block states and RASC context) into `ram_print`.
+  3. Send **`MVE_RESPONSE_CODE_ERROR`** (`2010`) with **`error_code = MVE_ERROR_WATCHDOG` (`9`)** and a descriptive message in `MSG_OUTQ`, followed by `CR14 = 0` and `0xFF02B028 = 1`.
+  4. Enter a safe/halted state awaiting `TERMINATE` from the host.
 
-> **Watchdog do lado Host (`[P][O]`):** Independentemente do watchdog interno do firmware, o driver Linux mantém um watchdog de sessão próprio (default observado: `30.000 ms`). Se o firmware travar sem responder, o driver invoca `mvx_lsid_terminate` e sinaliza erro à camada V4L2.
+> **Host-side watchdog (`[P][O]`):** Independently of the firmware's internal watchdog, the Linux driver maintains its own session watchdog (observed default: `30,000 ms`). If the firmware hangs without responding, the driver invokes `mvx_lsid_terminate` and reports an error to the V4L2 layer.
 
 ---
 
-## 2. Tratamento de `MMU ABORT` — Controlador de 8 Bus Masters (`0xFF02_4000`) (`[D]`)
+## 2. `MMU ABORT` Handling — 8-Bus-Master Controller (`0xFF02_4000`) (`[D]`)
 
-Quando qualquer unidade interna tenta acessar um endereço virtual não mapeado (`AP = 0`) ou viola permissões de página (`RO`/`X`/`RW`), o hardware dispara o **bit 3 (`0x0000_0008`)** em `IRQ_STATUS` do controlador de interrupção da RASC supervisora.
+When any internal unit attempts to access an unmapped virtual address (`AP = 0`) or violates page permissions (`RO`/`X`/`RW`), the hardware asserts **bit 3 (`0x0000_0008`)** in `IRQ_STATUS` of the supervisor RASC's interrupt controller.
 
-O bloco MMU interno em **`0xFF02_4000`** mantém pares de registradores `FAULT` / `FADDR` para **8 bus masters**, com stride de **`0x20` bytes** por master (`m = 0..7`):
+The internal MMU block at **`0xFF02_4000`** maintains `FAULT` / `FADDR` register pairs for **8 bus masters**, with a stride of **`0x20` bytes** per master (`m = 0..7`):
 
 ```text
-MMU_FAULT(m) = 0xFF02_4010 + m * 0x20    (32b R/W: != 0 indica falha ativa; escrever 0 limpa)
-MMU_FADDR(m) = 0xFF02_4014 + m * 0x20    (32b R:   endereço virtual de 32 bits que causou a falha)
+MMU_FAULT(m) = 0xFF02_4010 + m * 0x20    (32b R/W: != 0 indicates active fault; writing 0 clears)
+MMU_FADDR(m) = 0xFF02_4014 + m * 0x20    (32b R:   32-bit virtual address that caused the fault)
 ```
 
-| Master `m` | Subsistema Bus Master | `MMU_FAULT` (R/W0C) | `MMU_FADDR` (R) |
+| Master `m` | Bus Master Subsystem | `MMU_FAULT` (R/W0C) | `MMU_FADDR` (R) |
 |---:|---|---|---|
 | `0` | **RASC0** | `0xFF02_4010` | `0xFF02_4014` |
 | `1` | **RASC1** | `0xFF02_4030` | `0xFF02_4034` |
@@ -57,63 +57,63 @@ MMU_FADDR(m) = 0xFF02_4014 + m * 0x20    (32b R:   endereço virtual de 32 bits 
 | `6` | **VDMA** | `0xFF02_40D0` | `0xFF02_40D4` |
 | `7` | **REF** | `0xFF02_40F0` | `0xFF02_40F4` |
 
-### Sequência Obrigatória de Tratamento de `MMU ABORT`
+### Mandatory `MMU ABORT` Handling Sequence
 
-1. Iterar `m = 0 .. 7`:
-   - Ler `fault = *(volatile uint32_t *)(0xFF024010 + m * 0x20)`.
-   - Se `fault != 0`:
-     - Ler `faddr = *(volatile uint32_t *)(0xFF024014 + m * 0x20)`.
-     - Registrar master `m`, `fault` e `faddr` em `ram_print` / mensagem de erro.
-     - Limpar a falha escrevendo **`0`** em `0xFF024010 + m * 0x20`.
-2. Enviar **`MVE_RESPONSE_CODE_ERROR`** (`2010`) com **`error_code = MVE_ERROR_ABORT` (`1`)** ao host (`CR14 = 0` + `0xFF02B028 = 1`).
-3. Cessar operações de vídeo na sessão (erro fatal) e aguardar `TERMINATE` do host.
+1. Iterate `m = 0 .. 7`:
+   - Read `fault = *(volatile uint32_t *)(0xFF024010 + m * 0x20)`.
+   - If `fault != 0`:
+     - Read `faddr = *(volatile uint32_t *)(0xFF024014 + m * 0x20)`.
+     - Log master `m`, `fault`, and `faddr` to `ram_print` / error message.
+     - Clear the fault by writing **`0`** to `0xFF024010 + m * 0x20`.
+2. Send **`MVE_RESPONSE_CODE_ERROR`** (`2010`) with **`error_code = MVE_ERROR_ABORT` (`1`)** to the host (`CR14 = 0` + `0xFF02B028 = 1`).
+3. Cease video operations in the session (fatal error) and await `TERMINATE` from the host.
 
 ---
 
-## 3. Exceções de CPU (`RASC ABORT`) (`[D]`)
+## 3. CPU Exceptions (`RASC ABORT`) (`[D]`)
 
-Quando uma exceção síncrona atinge as entradas `1..3` da tabela de vetores em `CR0`:
+When a synchronous exception hits entries `1..3` of the vector table in `CR0`:
 
-1. O stub salva `r0..r14` na pilha (`push r0-r14`), lê:
+1. The stub saves `r0..r14` on the stack (`push r0-r14`), reads:
    - **`CR2`** (`mfcr r, 2`) = `FAR` (*Fault Address Register*),
-   - **`CR1`** (`mfcr r, 1`) = `PC` da instrução faltosa,
+   - **`CR1`** (`mfcr r, 1`) = `PC` of the faulting instruction,
    - **`SR`** (`mfsr r`) = *Status Register*,
    - **`CR18`** (`mfcr r, 0x12`) = `RASC_ID` (`0..4`),
-   e empilha `(FAR, PC, SR)` no topo do frame.
-2. O tratador registra `RASC_ID`, `PC`, `SR`, `FAR` e `R[0..14]` (e opcionalmente faz dump da pilha e dos 8 bus masters da MMU em `0xFF02_4010+`).
-3. Envia `MVE_RESPONSE_CODE_ERROR` (`MVE_ERROR_ABORT = 1`) se o canal MVE estiver utilizável e entra em parada segura (nunca executa `rte` em abort fatal).
+   and pushes `(FAR, PC, SR)` onto the top of the frame.
+2. The handler logs `RASC_ID`, `PC`, `SR`, `FAR`, and `R[0..14]` (and optionally dumps the stack and all 8 MMU bus masters at `0xFF02_4010+`).
+3. Sends `MVE_RESPONSE_CODE_ERROR` (`MVE_ERROR_ABORT = 1`) if the MVE channel is usable and enters a safe halt (never executes `rte` on a fatal abort).
 
 ---
 
-## 4. Falhas de DMA e Blocos Internos (`[D]`)
+## 4. DMA and Internal Block Faults (`[D]`)
 
-- **Falha de SDMA:** Ler `*(volatile uint32_t *)0xFF021F00` (registrador de falha do controlador SDMA). Valor diferente de zero indica erro de transferência em canal SDMA; detalhes de canais podem ser inspecionados em `0xFF02_1000` (status), `0xFF02_1600` (dispositivos pendentes) e `0xFF02_1804`/`0xFF02_180C` (descritores).
-- **Erros recuperáveis de bitstream (não-fatais):** Em decodificação, cabeçalhos ou slices corrompidos **não** devem abortar a sessão com `MVE_RESPONSE_CODE_ERROR`; em vez disso:
-  - Emitir `MVE_RESPONSE_CODE_EVENT` (`2016`) com `MVE_EVENT_ERROR_STREAM_CORRUPT` (`1`) ou `MVE_EVENT_ERROR_STREAM_NOT_SUPPORTED` (`2`).
-  - Marcar eventuais quadros afetados com `MVE_BUFFER_FRAME_FLAG_CORRUPT` (`0x2000`) ao devolvê-los em `BUF_OUTRQ`.
-
----
-
-## 5. Comando `MVE_REQUEST_CODE_DUMP` (`1008`) (`[P][D]`)
-
-Quando o host envia `MVE_REQUEST_CODE_DUMP`:
-1. **Sessão protegida:** Se a sessão for protegida, **proibir** o dump e reportar erro (`MVE_ERROR_UNSUPPORTED` / `MVE_ERROR_INVALID_STATE`), para não vazar metadados de conteúdo protegido.
-2. **Sessão normal:** Gravar snapshot de diagnóstico em `ram_print` (`0x1010_0000`), cobrindo:
-   - Revisão interna do silício (`0xFF02_B06C`) e relógio do core (`0xFF02_B004`),
-   - Estado lógico da sessão e filas MVE,
-   - Registradores de status dos blocos de vídeo (`BITSTREAM`, `REF`, `MC`, `TRF`, `DBL`, `SDMA`, `VDMA`).
-3. Enviar **`MVE_RESPONSE_CODE_DUMP`** (`2012`, `size = 0`) ao host.
+- **SDMA fault:** Read `*(volatile uint32_t *)0xFF021F00` (SDMA controller fault register). A non-zero value indicates an SDMA channel transfer error; channel details can be inspected at `0xFF02_1000` (status), `0xFF02_1600` (pending devices), and `0xFF02_1804`/`0xFF02_180C` (descriptors).
+- **Recoverable bitstream errors (non-fatal):** During decoding, corrupted headers or slices must **not** abort the session with `MVE_RESPONSE_CODE_ERROR`; instead:
+  - Emit `MVE_RESPONSE_CODE_EVENT` (`2016`) with `MVE_EVENT_ERROR_STREAM_CORRUPT` (`1`) or `MVE_EVENT_ERROR_STREAM_NOT_SUPPORTED` (`2`).
+  - Mark any affected frames with `MVE_BUFFER_FRAME_FLAG_CORRUPT` (`0x2000`) when returning them in `BUF_OUTRQ`.
 
 ---
 
-## 6. Recuperação Forçada pelo Host (`TERMINATE` e `RESET`) (`[P]`)
+## 5. `MVE_REQUEST_CODE_DUMP` Command (`1008`) (`[P][D]`)
 
-Caso uma sessão não responda após erro fatal ou timeout:
-1. O host remove o LSID de `JOBQUEUE` (com `ENABLE = 0` → atualiza `JOBQUEUE` → `ENABLE = 1`).
-2. O host escreve `1` em `LSID.TERMINATE` (`+0x18`) e faz poll até `TERMINATE == 0` (o hardware aborta imediatamente todos os cores que estejam executando aquele LSID e libera suas entradas em `CORELSID`).
-3. O host desmapeia o LSID (`SCHED = 0`, `ALLOC = 0`) e libera as tabelas MMU.
-4. Em caso de suspensão/retomada ou travamento global do bloco, o host executa `reset_hw()`: `RESET (0x50) = 1` → poll `CORELSID == corelsid_mask` (`0xFF` no K1, `0xFFFF` no K3) → `CLKFORCE (0x24) = 0`.
+When the host sends `MVE_REQUEST_CODE_DUMP`:
+1. **Protected session:** If the session is protected, **forbid** the dump and report an error (`MVE_ERROR_UNSUPPORTED` / `MVE_ERROR_INVALID_STATE`) to avoid leaking protected content metadata.
+2. **Normal session:** Write a diagnostic snapshot to `ram_print` (`0x1010_0000`), covering:
+   - Internal silicon revision (`0xFF02_B06C`) and core clock (`0xFF02_B004`),
+   - Logical session state and MVE queues,
+   - Status registers of the video blocks (`BITSTREAM`, `REF`, `MC`, `TRF`, `DBL`, `SDMA`, `VDMA`).
+3. Send **`MVE_RESPONSE_CODE_DUMP`** (`2012`, `size = 0`) to the host.
 
 ---
 
-*Licença: [CC-BY-SA-4.0](LICENSE) — Creative Commons Attribution-ShareAlike 4.0 International.*
+## 6. Host-Initiated Forced Recovery (`TERMINATE` and `RESET`) (`[P]`)
+
+If a session fails to respond after a fatal error or timeout:
+1. The host removes the LSID from `JOBQUEUE` (with `ENABLE = 0` → update `JOBQUEUE` → `ENABLE = 1`).
+2. The host writes `1` to `LSID.TERMINATE` (`+0x18`) and polls until `TERMINATE == 0` (the hardware immediately aborts all cores executing that LSID and frees their entries in `CORELSID`).
+3. The host unmaps the LSID (`SCHED = 0`, `ALLOC = 0`) and frees the MMU tables.
+4. In the event of suspend/resume or a global block hang, the host executes `reset_hw()`: `RESET (0x50) = 1` → poll `CORELSID == corelsid_mask` (`0xFF` on K1, `0xFFFF` on K3) → `CLKFORCE (0x24) = 0`.
+
+---
+
+*License: [CC-BY-SA-4.0](LICENSE) — Creative Commons Attribution-ShareAlike 4.0 International.*

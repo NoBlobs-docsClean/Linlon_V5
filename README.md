@@ -1,100 +1,100 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 
-# Especificação Clean-Room — Firmware da VPU SpacemiT K1 / K3 (Arm China Linlon V5)
+# Clean-Room Specification — SpacemiT K1 / K3 VPU Firmware (Arm China Linlon V5)
 
-Esta pasta contém a especificação comportamental, de arquitetura de hardware, de ISA e de contrato ABI para uma **reimplementação em sala limpa (*clean-room*)** do firmware da VPU **Arm China Linlon V5** (`HARDWARE_ID = 0x56635002`, família de driver `MVE_v52_v76`) integrada aos SoCs **SpacemiT Key Stone K1** (2 cores a 819,2 MHz) e **SpacemiT K3** (4 cores a 1 GHz).
+This folder contains the behavioral, hardware architecture, ISA, and ABI contract specification for a **clean-room reimplementation** of the **Arm China Linlon V5** VPU firmware (`HARDWARE_ID = 0x56635002`, driver family `MVE_v52_v76`) integrated into the **SpacemiT Key Stone K1** (2 cores at 819.2 MHz) and **SpacemiT K3** (4 cores at 1 GHz) SoCs.
 
-O alvo primário desta especificação é o contrato aberto **MVE 3.5** implementado pelo driver Linux GPL-2.0 `mvx` (`compatible = "arm china,linlon-v5"`, diretório de firmware `linlon-v52_v76-80-2/`), executando sobre as **5 CPUs RASC de 32 bits por core** da VPU.
-
----
-
-## Regras de Leitura e Proveniência
-
-Antes de iniciar qualquer implementação, leia [clean-room-process.md](clean-room-process.md).
-
-Cada afirmação técnica nesta especificação segue três níveis de proveniência:
-
-- **`[P]` Público (*Public*)** — Contrato normativo derivado diretamente de fontes abertas: headers GPL-2.0 do driver Linux `mvx` (`mve_protocol_def.h`, `mvx_hwreg.h`, `mvx_mmu.h`, `mvx_lsid.h`, `mvx_firmware_cache.h`), Device Trees do SpacemiT K1/K3, datasheets/manuais públicos SpacemiT, apresentações técnicas públicas da Arm China e o toolchain público `ARM-software/rasc-devkit` (GPLv2, binutils 2.18 + GCC 4.2.3).
-- **`[O]` Observado em Hardware (*Observed*)** — Comportamento, valor de registrador, trace MVE ou semântica de instrução verificada empiricamente em placa real (**SpacemiT K1 BPI-F3** e/ou **SpacemiT K3 Pico ITX**), incluindo execução de código RASC próprio compilado com `rasc-elf-gcc` sobre o silício do K1.
-- **`[D]` Especificação Derivada (*Derived*)** — Requisito comportamental, registrador MMIO interno, registrador de controle (`CR`) ou sequência de programação necessária para que o silício `0x56635002` responda corretamente ao contrato `[P]` e reproduza o comportamento `[O]`, descrita exclusivamente em termos de hardware e ABI pública.
+The primary target of this specification is the open **MVE 3.5** contract implemented by the GPL-2.0 Linux `mvx` driver (`compatible = "arm china,linlon-v5"`, firmware directory `linlon-v52_v76-80-2/`), executing on the VPU's **5 32-bit RASC CPUs per core**.
 
 ---
 
-## Mapa da Documentação
+## Reading Rules and Provenance
 
-### 1. Governança, Arquitetura e Plataforma
+Before starting any implementation, read [clean-room-process.md](clean-room-process.md).
 
-| # | Documento | Conteúdo |
-|---:|---|---|
-| 01 | [clean-room-process.md](clean-room-process.md) | Firewall de sala limpa, o que entra e o que é proibido, hierarquia de fontes, protocolo de clarificação e marcos de aceitação (M1–M6) |
-| 02 | [overview.md](overview.md) | Arquitetura da VPU Linlon V5 (`0x56635002`), comparação K1 (2 cores) × K3 (4 cores), modelo de 5 CPUs RASC por core e fronteira Host × Firmware |
-| 03 | [open-vs-closed.md](open-vs-closed.md) | Fontes abertas (`mvx` GPL-2.0, `rasc-devkit` GPLv2) × blobs proprietários, MVE v2 vs MVE 3.5 e continuidade K1 × K3 |
-| 04 | [soc-integration.md](soc-integration.md) | Integração nos SoCs K1 e K3: Device Tree, janela MMIO `0xC050_0000`, IRQ 74, clock/reset/energia, DVFS, reset de hardware e tradução DMA (`phys_cpu2vpu`/`phys_vpu2cpu`) |
+Every technical statement in this specification follows three provenance levels:
 
-### 2. Registradores Host, Escalonador e MMU
-
-| # | Documento | Conteúdo |
-|---:|---|---|
-| 05 | [host-registers.md](host-registers.md) | Mapa completo dos registradores APB em `0xC050_0000`: globais (`0x00`–`0x50`), por LSID (`0x0200 + 0x40 * lsid`), bitfields, fuses e snapshots em repouso no K1/K3 |
-| 06 | [lsid-and-scheduler.md](lsid-and-scheduler.md) | Contextos LSID (4 LSIDs), escalabilidade transparente de 2/4 cores, Map/Unmap/Terminate/PCB, `JOBQUEUE` (4 slots), IRQ Host↔VPU e `SWITCH` |
-| 07 | [mmu-and-memory-model.md](mmu-and-memory-model.md) | MMU de 2 níveis (VA 32b → PA 40b, páginas de 4 KiB, PTE de 32 bits `AT`/`PA`/`AP`, `FLUSH_ALL`), mapa completo de VA MVE 3.x e coerência |
-
-### 3. Contêiner de Firmware, CPU RASC e Toolchain
-
-| # | Documento | Conteúdo |
-|---:|---|---|
-| 08 | [firmware-container.md](firmware-container.md) | Contêiner `.fwb`: `struct mvx_fw_header` (180 B), algoritmo de carga (`VA 0x1000`), `text_length` incluindo header, `bss_bitmap` vs `master_rw`, trampolim e nomes de arquivo |
-| 09 | [rasc-isa.md](rasc-isa.md) | Referência completa da ISA RASC (1–6 B + sufixos 1–4 B, `r0`–`r15`/`v0`–`v15`, semântica **BCC3** por contagem de instruções e correções validadas em silício) |
-| 10 | [rasc-execution-environment.md](rasc-execution-environment.md) | Ambiente das 5 CPUs RASC: `CR0` (VBAR), `CR1` (PC), `CR2` (FAR), `CR4` (base de instância), `CR14` (barreira), `CR15` (cache), `CR16` (ciclos), `CR18` (`RASC_ID`), bancos `CR 0x20..0xFF` e tratamento de exceções |
-| 11 | [rasc-toolchain-and-abi.md](rasc-toolchain-and-abi.md) | Compilação freestanding com `ARM-software/rasc-devkit` (GCC 4.2.3 + binutils 2.18 `rasc-elf`), ABI medida (`r0`–`r4`, `r0:r1`, `r5`–`r13`), linker script e armadilhas |
-
-### 4. Programação de Hardware Interno do Core (Boot, IRQs, Recuperação e Subsistemas)
-
-| # | Documento | Conteúdo |
-|---:|---|---|
-| 12 | [boot-core-init.md](boot-core-init.md) | Sequência passo a passo de boot do core: `CR3=0x1A7`, vetores/resets RASC1..4 (`0xFF023000`), spinlock `0xFF02B038`, `CR4`, `CR15`, defaults (`0xFF02400C`, `0xFF02B034`, `0xFF021F04`), validação `0xFF02B068..7C` e switch-out `0xFF02B030` |
-| 13 | [rasc-irq-and-sync.md](rasc-irq-and-sync.md) | Tabela de 4 vetores em `CR0`, `clri`/`seti` aninháveis, 5 controladores de IRQ (`0xFF026000..0xFF02A000`), bits `IRQHOST` (b18 + clear `0xFF02B02C`), `MMU` (b3), `WATCHDOG` (b4), inter-core (b23), doorbells e spinlock atômico |
-| 14 | [hardware-recovery.md](hardware-recovery.md) | Watchdog (`0xFF025000`), `MMU ABORT` nos 8 bus masters (`0xFF024010+`, stride `0x20`), `RASC ABORT`, falha de SDMA (`0xFF021F00`), `DUMP`, erros MVE e `TERMINATE` |
-| 15 | [internal-mmio-map.md](internal-mmio-map.md) | Mapa consolidado de `0xFF00_0000`–`0xFF2F_8FFF`: Session SRAM, Core-Local SRAM, `SDMA`, `VDMA`, `RASC_CTRL`, `MMU`, `WATCHDOG`, 5×IRQ, `SYSCTRL` e os 6 blocos de vídeo (`0xFF04_0000`..`0xFF18_0000`, stride 256 KiB) |
-| 16 | [video-subsystems.md](video-subsystems.md) | Subsistemas fixos (`BITSTREAM`, `REF`, `ME`, `MC`, `TRF`, `DBL`, `SDMA`, `VDMA`, `SYSCTRL`, `MMU`), fluxos de decode/encode, `IntBuf`, DPB e coordenação multi-core |
-
-### 5. Protocolo Host ↔ Firmware (MVE 3.5)
-
-| # | Documento | Conteúdo |
-|---:|---|---|
-| 17 | [mve-queues-and-rpc.md](mve-queues-and-rpc.md) | 6 filas circulares de 4 KiB (`0x1007_9000`–`0x1007_E000`, 1020 words), empacotamento word-aligned, canal RPC (`0x1007_F000`) e RAM de print circular (`0x1010_0000`, magic `0x11223356`) |
-| 18 | [mve-messages-and-states.md](mve-messages-and-states.md) | Catálogo completo de requisições (`1001`–`1013`), respostas (`2001`–`2019`), códigos de erro (`1`–`9`), eventos (`PROCESSED`, `REF_FRAME`, `TRACE_BUFFERS`) e máquina de estados (`STOPPED`/`RUNNING`) |
-| 19 | [mve-options.md](mve-options.md) | Referência completa de `MVE_REQUEST_CODE_SET_OPTION` (`1010`): todos os índices (`1`–`69`), payloads estruturados e bitmasks |
-| 20 | [mve-buffers-and-formats.md](mve-buffers-and-formats.md) | Descritores de buffer (`3001`–`3004`): `mve_buffer_frame` (Planar e AFBC, bitfield `format`), `mve_buffer_bitstream`, `mve_buffer_param` (19 tipos), `mve_buffer_general` e validações |
-
-### 6. Codecs, Validação em Placa e Referência
-
-| # | Documento | Conteúdo |
-|---:|---|---|
-| 21 | [codecs-and-capabilities.md](codecs-and-capabilities.md) | Matriz dos 12 codecs de decode e 5 de encode, arquivos `.fwb` (incluindo H.263 → `mpeg4dec.fwb`), formatos de pixel, fuses e restrições por codec |
-| 22 | [observed-sequences-and-gaps.md](observed-sequences-and-gaps.md) | Sequências reais no K1 e K3 (decode H.264 128×128, RPC, firmware próprio em RASC), armadilhas de plataforma e registro formal das lacunas abertas (**G1–G5**) |
-| 23 | [glossary.md](glossary.md) | Glossário de siglas e termos técnicos da arquitetura Linlon V5, RASC, MVE 3.5, AFBC, LSID e SpacemiT K1/K3 |
+- **`[P]` Public** — Normative contract derived directly from open sources: GPL-2.0 headers of the Linux `mvx` driver (`mve_protocol_def.h`, `mvx_hwreg.h`, `mvx_mmu.h`, `mvx_lsid.h`, `mvx_firmware_cache.h`), SpacemiT K1/K3 Device Trees, public SpacemiT datasheets/manuals, public Arm China technical presentations, and the public `ARM-software/rasc-devkit` toolchain (GPLv2, binutils 2.18 + GCC 4.2.3).
+- **`[O]` Observed on Hardware** — Behavior, register value, MVE trace, or instruction semantics empirically verified on real boards (**SpacemiT K1 BPI-F3** and/or **SpacemiT K3 Pico ITX**), including execution of custom RASC code compiled with `rasc-elf-gcc` on K1 silicon.
+- **`[D]` Derived Specification** — Behavioral requirement, internal MMIO register, control register (`CR`), or programming sequence required for `0x56635002` silicon to respond properly to the `[P]` contract and reproduce the `[O]` behavior, described exclusively in terms of hardware and public ABI.
 
 ---
 
-## Status de Cobertura para Reimplementação
+## Documentation Map
 
-- **Alvo de silício confirmado:** Arm China **Linlon V5**, `HARDWARE_ID = 0x56635002` (família `0x5663`, revisão `0x50` = 80, patch `0x02`), `FUSE = 0x00000000`, `NLSID = 4`.
-  - **SpacemiT K1:** `NCORES = 2`, `CONFIG = 0xFFFF6402`, clock padrão `819,2 MHz`.
-  - **SpacemiT K3:** `NCORES = 4`, `CONFIG = 0xFFFF7404`, clock padrão `1 GHz`.
-- **Plano de Controle (Marcos M1, M2 e M3) — COBERTURA COMPLETA:**
-  1. Contêiner `.fwb`, carga na MMU, trampolim, pilha PC-relativa, ISA escalar RASC e ABI GCC 4.2.3 validados em silício.
-  2. Sequência completa de boot do core ([boot-core-init.md](boot-core-init.md)): RASC0 + RASC1..4 (`0xFF023000`), spinlock de hardware (`0xFF02B038`), `CR4` base de instância, `CR15` cache, `CR0` VBAR (4 vetores), unit defaults (`0xFF02400C`, `0xFF02B034`, `0xFF021F04`), validação `HARDWARE_ID`/DSL e switch-out (`0xFF02B030`).
-  3. Controladores de interrupção por RASC (`0xFF026000..0xFF02A000`), `IRQHOST` (bit 18 + clear `0xFF02B02C`), IRQ FW→Host (`CR14=0` + `0xFF02B028=1`), Watchdog (`0xFF025000`) e `MMU ABORT` nos 8 bus masters (`0xFF024010+`).
-  4. Protocolo completo MVE 3.5 (filas circulares, RPC, mensagens, opções, buffers, eventos e `ram_print`).
-- **Plano de Dados de Vídeo (Marcos M4–M6) — BASE MAPEADA, SEQUÊNCIAS POR CODEC EM ABERTO:**
-  - Todas as bases MMIO dos 6 aceleradores de vídeo (`0xFF04_0000`–`0xFF18_0000`, stride 256 KiB) e DMAs (`SDMA` `0xFF02_1000`, `VDMA` `0xFF02_2000`) + registradores de status/controle principais estão mapeados.
-  - A programação detalhada bit a bit para disparar quadros/stripes em cada acelerador (lacunas **G1–G2** em [observed-sequences-and-gaps.md](observed-sequences-and-gaps.md)) será fechada nas rodadas dedicadas ao plano de dados (iniciando por JPEG em M4 e H.264 em M5).
+### 1. Governance, Architecture, and Platform
+
+| # | Document | Contents |
+|---:|---|---|
+| 01 | [clean-room-process.md](clean-room-process.md) | Clean-room firewall, what is allowed and what is forbidden, source hierarchy, clarification protocol, and acceptance milestones (M1–M6) |
+| 02 | [overview.md](overview.md) | Linlon V5 VPU architecture (`0x56635002`), K1 (2 cores) vs. K3 (4 cores) comparison, 5-RASC-CPU-per-core model, and Host vs. Firmware boundary |
+| 03 | [open-vs-closed.md](open-vs-closed.md) | Open sources (`mvx` GPL-2.0, `rasc-devkit` GPLv2) vs. proprietary blobs, MVE v2 vs. MVE 3.5, and K1 vs. K3 continuity |
+| 04 | [soc-integration.md](soc-integration.md) | Integration in K1 and K3 SoCs: Device Tree, `0xC050_0000` MMIO window, IRQ 74, clock/reset/power, DVFS, hardware reset, and DMA translation (`phys_cpu2vpu`/`phys_vpu2cpu`) |
+
+### 2. Host Registers, Scheduler, and MMU
+
+| # | Document | Contents |
+|---:|---|---|
+| 05 | [host-registers.md](host-registers.md) | Complete map of APB registers at `0xC050_0000`: global (`0x00`–`0x50`), per-LSID (`0x0200 + 0x40 * lsid`), bitfields, fuses, and idle snapshots on K1/K3 |
+| 06 | [lsid-and-scheduler.md](lsid-and-scheduler.md) | LSID contexts (4 LSIDs), transparent 2/4-core scalability, Map/Unmap/Terminate/PCB, `JOBQUEUE` (4 slots), Host↔VPU IRQ, and `SWITCH` |
+| 07 | [mmu-and-memory-model.md](mmu-and-memory-model.md) | 2-level MMU (32-bit VA → 40-bit PA, 4 KiB pages, 32-bit PTE `AT`/`PA`/`AP`, `FLUSH_ALL`), complete MVE 3.x VA map, and coherency |
+
+### 3. Firmware Container, RASC CPU, and Toolchain
+
+| # | Document | Contents |
+|---:|---|---|
+| 08 | [firmware-container.md](firmware-container.md) | `.fwb` container: `struct mvx_fw_header` (180 B), load algorithm (`VA 0x1000`), `text_length` including header, `bss_bitmap` vs. `master_rw`, trampoline, and filenames |
+| 09 | [rasc-isa.md](rasc-isa.md) | Complete RASC ISA reference (1–6 B + 1–4 B suffixes, `r0`–`r15`/`v0`–`v15`, **BCC3** instruction-count semantics, and silicon-validated corrections) |
+| 10 | [rasc-execution-environment.md](rasc-execution-environment.md) | Environment of the 5 RASC CPUs: `CR0` (VBAR), `CR1` (PC), `CR2` (FAR), `CR4` (instance base), `CR14` (barrier), `CR15` (cache), `CR16` (cycles), `CR18` (`RASC_ID`), `CR 0x20..0xFF` banks, and exception handling |
+| 11 | [rasc-toolchain-and-abi.md](rasc-toolchain-and-abi.md) | Freestanding compilation with `ARM-software/rasc-devkit` (GCC 4.2.3 + binutils 2.18 `rasc-elf`), measured ABI (`r0`–`r4`, `r0:r1`, `r5`–`r13`), linker script, and pitfalls |
+
+### 4. Internal Core Hardware Programming (Boot, IRQs, Recovery, and Subsystems)
+
+| # | Document | Contents |
+|---:|---|---|
+| 12 | [boot-core-init.md](boot-core-init.md) | Step-by-step core boot sequence: `CR3=0x1A7`, RASC1..4 vectors/resets (`0xFF023000`), spinlock `0xFF02B038`, `CR4`, `CR15`, defaults (`0xFF02400C`, `0xFF02B034`, `0xFF021F04`), `0xFF02B068..7C` validation, and `0xFF02B030` switch-out |
+| 13 | [rasc-irq-and-sync.md](rasc-irq-and-sync.md) | 4-vector table at `CR0`, nestable `clri`/`seti`, 5 IRQ controllers (`0xFF026000..0xFF02A000`), `IRQHOST` bits (b18 + clear `0xFF02B02C`), `MMU` (b3), `WATCHDOG` (b4), inter-core (b23), doorbells, and atomic spinlock |
+| 14 | [hardware-recovery.md](hardware-recovery.md) | Watchdog (`0xFF025000`), `MMU ABORT` across the 8 bus masters (`0xFF024010+`, stride `0x20`), `RASC ABORT`, SDMA fault (`0xFF021F00`), `DUMP`, MVE errors, and `TERMINATE` |
+| 15 | [internal-mmio-map.md](internal-mmio-map.md) | Consolidated map of `0xFF00_0000`–`0xFF2F_8FFF`: Session SRAM, Core-Local SRAM, `SDMA`, `VDMA`, `RASC_CTRL`, `MMU`, `WATCHDOG`, 5×IRQ, `SYSCTRL`, and the 6 video blocks (`0xFF04_0000`..`0xFF18_0000`, 256 KiB stride) |
+| 16 | [video-subsystems.md](video-subsystems.md) | Fixed subsystems (`BITSTREAM`, `REF`, `ME`, `MC`, `TRF`, `DBL`, `SDMA`, `VDMA`, `SYSCTRL`, `MMU`), decode/encode flows, `IntBuf`, DPB, and multi-core coordination |
+
+### 5. Host ↔ Firmware Protocol (MVE 3.5)
+
+| # | Document | Contents |
+|---:|---|---|
+| 17 | [mve-queues-and-rpc.md](mve-queues-and-rpc.md) | 6 circular 4 KiB queues (`0x1007_9000`–`0x1007_E000`, 1020 words), word-aligned packing, RPC channel (`0x1007_F000`), and circular print RAM (`0x1010_0000`, magic `0x11223356`) |
+| 18 | [mve-messages-and-states.md](mve-messages-and-states.md) | Complete catalog of requests (`1001`–`1013`), responses (`2001`–`2019`), error codes (`1`–`9`), events (`PROCESSED`, `REF_FRAME`, `TRACE_BUFFERS`), and state machine (`STOPPED`/`RUNNING`) |
+| 19 | [mve-options.md](mve-options.md) | Complete reference for `MVE_REQUEST_CODE_SET_OPTION` (`1010`): all indices (`1`–`69`), structured payloads, and bitmasks |
+| 20 | [mve-buffers-and-formats.md](mve-buffers-and-formats.md) | Buffer descriptors (`3001`–`3004`): `mve_buffer_frame` (Planar and AFBC, `format` bitfield), `mve_buffer_bitstream`, `mve_buffer_param` (19 types), `mve_buffer_general`, and validations |
+
+### 6. Codecs, Board Validation, and Reference
+
+| # | Document | Contents |
+|---:|---|---|
+| 21 | [codecs-and-capabilities.md](codecs-and-capabilities.md) | Matrix of the 12 decode codecs and 5 encode codecs, `.fwb` files (including H.263 → `mpeg4dec.fwb`), pixel formats, fuses, and per-codec restrictions |
+| 22 | [observed-sequences-and-gaps.md](observed-sequences-and-gaps.md) | Real sequences on K1 and K3 (H.264 128×128 decode, RPC, custom RASC firmware), platform pitfalls, and formal registry of open gaps (**G1–G5**) |
+| 23 | [glossary.md](glossary.md) | Glossary of acronyms and technical terms for Linlon V5, RASC, MVE 3.5, AFBC, LSID, and SpacemiT K1/K3 architecture |
 
 ---
 
-## Licença
+## Reimplementation Coverage Status
 
-Esta especificação é distribuída sob a licença **Creative Commons Attribution-ShareAlike 4.0 International (`CC-BY-SA-4.0`)**. Consulte o arquivo [LICENSE](LICENSE) para os termos completos.
+- **Confirmed silicon target:** Arm China **Linlon V5**, `HARDWARE_ID = 0x56635002` (family `0x5663`, revision `0x50` = 80, patch `0x02`), `FUSE = 0x00000000`, `NLSID = 4`.
+  - **SpacemiT K1:** `NCORES = 2`, `CONFIG = 0xFFFF6402`, default clock `819.2 MHz`.
+  - **SpacemiT K3:** `NCORES = 4`, `CONFIG = 0xFFFF7404`, default clock `1 GHz`.
+- **Control Plane (Milestones M1, M2, and M3) — FULL COVERAGE:**
+  1. `.fwb` container, MMU loading, trampoline, PC-relative stack, scalar RASC ISA, and GCC 4.2.3 ABI validated on silicon.
+  2. Complete core boot sequence ([boot-core-init.md](boot-core-init.md)): RASC0 + RASC1..4 (`0xFF023000`), hardware spinlock (`0xFF02B038`), `CR4` instance base, `CR15` cache, `CR0` VBAR (4 vectors), unit defaults (`0xFF02400C`, `0xFF02B034`, `0xFF021F04`), `HARDWARE_ID`/DSL validation, and switch-out (`0xFF02B030`).
+  3. Per-RASC interrupt controllers (`0xFF026000..0xFF02A000`), `IRQHOST` (bit 18 + clear `0xFF02B02C`), FW→Host IRQ (`CR14=0` + `0xFF02B028=1`), Watchdog (`0xFF025000`), and `MMU ABORT` across the 8 bus masters (`0xFF024010+`).
+  4. Complete MVE 3.5 protocol (circular queues, RPC, messages, options, buffers, events, and `ram_print`).
+- **Video Data Plane (Milestones M4–M6) — BASE MAPPED, PER-CODEC SEQUENCES OPEN:**
+  - All MMIO base addresses of the 6 video accelerators (`0xFF04_0000`–`0xFF18_0000`, 256 KiB stride) and DMAs (`SDMA` `0xFF02_1000`, `VDMA` `0xFF02_2000`) + primary status/control registers are mapped.
+  - Detailed bit-by-bit programming to trigger frames/stripes on each accelerator (gaps **G1–G2** in [observed-sequences-and-gaps.md](observed-sequences-and-gaps.md)) will be closed in dedicated data-plane rounds (starting with JPEG in M4 and H.264 in M5).
 
-*(Nota: definições de ABI pública referenciadas do driver Linux `mvx` e da tabela de ISA pública do `ARM-software/rasc-devkit` permanecem sob suas licenças originais `GPL-2.0-only` / `GPLv2`.)*
+---
+
+## License
+
+This specification is distributed under the **Creative Commons Attribution-ShareAlike 4.0 International (`CC-BY-SA-4.0`)** license. See the [LICENSE](LICENSE) file for the full terms.
+
+*(Note: public ABI definitions referenced from the Linux `mvx` driver and the public ISA table from `ARM-software/rasc-devkit` remain under their original `GPL-2.0-only` / `GPLv2` licenses.)*
